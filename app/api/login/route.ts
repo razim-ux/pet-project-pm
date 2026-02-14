@@ -25,9 +25,10 @@ export async function POST(req: Request) {
     }
 
     const result = await pool.query(
-      `SELECT id, email, password
+      `SELECT id, email, password::text AS password_hash
        FROM users
        WHERE email = $1
+       ORDER BY created_at DESC
        LIMIT 1`,
       [email]
     );
@@ -37,7 +38,7 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: 'Неверные данные' }, { status: 401 });
     }
 
-    const ok = await bcrypt.compare(password, user.password);
+    const ok = await bcrypt.compare(password, user.password_hash);
     if (!ok) {
       return NextResponse.json({ error: 'Неверные данные' }, { status: 401 });
     }
