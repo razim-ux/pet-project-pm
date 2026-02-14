@@ -3,7 +3,7 @@
 import { useState } from 'react';
 import { useRouter } from 'next/navigation';
 
-export default function RegisterPage() {
+export default function LoginPage() {
   const router = useRouter();
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -16,7 +16,7 @@ export default function RegisterPage() {
     setLoading(true);
 
     try {
-      const res = await fetch('/api/register', {
+      const res = await fetch('/api/login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email, password }),
@@ -29,9 +29,9 @@ export default function RegisterPage() {
         return;
       }
 
-      setMsg('Успешно зарегистрирован');
-      // если есть страница логина:
-      // router.push('/login');
+      setMsg('Успешный вход');
+      // пока нет сессии — просто перекидываем в "кабинет-заглушку"
+      router.push('/dashboard');
     } catch (err: any) {
       setMsg(err?.message || 'Ошибка сети');
     } finally {
@@ -41,7 +41,7 @@ export default function RegisterPage() {
 
   return (
     <div style={{ maxWidth: 420, margin: '40px auto', padding: 16 }}>
-      <h1 style={{ fontSize: 24, marginBottom: 16 }}>Регистрация</h1>
+      <h1 style={{ fontSize: 24, marginBottom: 16 }}>Вход</h1>
 
       <form onSubmit={onSubmit} style={{ display: 'grid', gap: 12 }}>
         <label style={{ display: 'grid', gap: 6 }}>
@@ -61,13 +61,13 @@ export default function RegisterPage() {
             type="password"
             value={password}
             onChange={(e) => setPassword(e.target.value)}
-            autoComplete="new-password"
+            autoComplete="current-password"
             required
           />
         </label>
 
         <button type="submit" disabled={loading}>
-          {loading ? '...' : 'Зарегистрироваться'}
+          {loading ? '...' : 'Войти'}
         </button>
 
         {msg && <div>{msg}</div>}
