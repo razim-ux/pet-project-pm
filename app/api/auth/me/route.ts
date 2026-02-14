@@ -10,11 +10,11 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ user: null }, { status: 200 });
   }
 
-  const userId = getUserIdBySessionToken(token);
+  const userId = await getUserIdBySessionToken(token);
   if (!userId) {
     return NextResponse.json({ user: null }, { status: 200 });
   }
 
-  const user = getUserById(userId);
+  const user = await getUserById(userId);
   return NextResponse.json({ user }, { status: 200 });
 }
