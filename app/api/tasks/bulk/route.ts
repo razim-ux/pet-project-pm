@@ -1,47 +1,30 @@
 import { NextRequest, NextResponse } from "next/server";
-import {
-  clearCompletedForUser,
-  completeAllForUser,
-  getAllByUser,
-  getUserIdBySessionToken,
-} from "../storage";
+import { getUserIdBySessionToken, completeAllForUser, clearCompletedForUser } from "../storage";
 
 export const runtime = "nodejs";
 
-function json(data: unknown, init?: ResponseInit) {
-  return NextResponse.json(data, init);
-}
-
-async function readBody(request: NextRequest) {
-  try {
-    return await request.json();
-  } catch {
-    return null;
-  }
-}
-
-function requireUserId(request: NextRequest): number | null {
+async function getUserIdFromRequest(request: NextRequest): Promise<number | null> {
   const token = request.cookies.get("session")?.value;
   if (!token) return null;
-  return getUserIdBySessionToken(token);
+  return await getUserIdBySessionToken(token);
 }
 
 export async function POST(request: NextRequest) {
-  const userId = requireUserId(request);
-  if (!userId) return json({ error: "unauthorized" }, { status: 401 });
+  const userId = await getUserIdFromRequest(request);
+  if (!userId) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
 
-  const body = await readBody(request);
-  const action = String(body?.action ?? "");
+  const body = await request.json().catch(() => null);
+  const action = body?.action;
 
-  if (action === "completeAll") {
-    const changed = completeAllForUser(userId);
-    return json({ ok: true, changed, tasks: getAllByUser(userId) }, { status: 200 });
+  if (action === "complete_all") {
+    const updated = await completeAllForUser(userId);
+    return NextResponse.json({ updated }, { status: 200 });
   }
 
-  if (action === "clearCompleted") {
-    const changed = clearCompletedForUser(userId);
-    return json({ ok: true, changed, tasks: getAllByUser(userId) }, { status: 200 });
+  if (action === "clear_completed") {
+    const deleted = await clearCompletedForUser(userId);
+    return NextResponse.json({ deleted }, { status: 200 });
   }
 
-  return json({ error: "unknown action" }, { status: 400 });
+  return NextResponse.json({ error: "bad_request" }, { status: 400 });
 }
