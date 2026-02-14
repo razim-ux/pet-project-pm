@@ -1,103 +1,123 @@
-import { NextRequest, NextResponse } from "next/server";
-import {
-  createForUser,
-  getAllByUser,
-  removeByIdForUser,
-  toggleCompletedForUser,
-  updateByIdForUser,
-  getUserIdBySessionToken,
-} from "./storage";
+export const runtime = 'nodejs';
 
-export const runtime = "nodejs";
+import { NextRequest, NextResponse } from 'next/server';
+import { Pool } from 'pg';
+import jwt from 'jsonwebtoken';
 
-function json(data: unknown, init?: ResponseInit) {
-  return NextResponse.json(data, init);
-}
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: { rejectUnauthorized: false },
+});
 
-async function readBody(request: NextRequest) {
+function getUserIdFromSession(req: NextRequest): number | null {
+  const token = req.cookies.get('session')?.value;
+  if (!token) return null;
+
+  const secret = process.env.JWT_SECRET;
+  if (!secret) return null;
+
   try {
-    return await request.json();
+    const payload = jwt.verify(token, secret) as any;
+    const id = Number(payload?.id);
+    return Number.isFinite(id) ? id : null;
   } catch {
     return null;
   }
 }
 
-function extractTitle(body: any) {
-  return String(body?.title ?? body?.task ?? "").trim();
+export async function GET(req: NextRequest) {
+  const userId = getUserIdFromSession(req);
+  if (!userId) return NextResponse.json({ error: 'unauthorized' }, { status: 401 });
+
+  const result = await pool.query(
+    `SELECT id, title, completed, created_at
+     FROM tasks
+     WHERE user_id = $1
+     ORDER BY id DESC
+     LIMIT 200`,
+    [userId]
+  );
+
+  return NextResponse.json({ tasks: result.rows }, { status: 200 });
 }
 
-function extractIdFromUrl(request: NextRequest) {
-  const { searchParams } = new URL(request.url);
-  const raw = searchParams.get("id");
-  const id = raw ? Number(raw) : NaN;
-  return Number.isFinite(id) ? id : null;
-}
+export async function POST(req: NextRequest) {
+  const userId = getUserIdFromSession(req);
+  if (!userId) return NextResponse.json({ error: 'unauthorized' }, { status: 401 });
 
-function requireUserId(request: NextRequest): number | null {
-  const token = request.cookies.get("session")?.value;
-  if (!token) return null;
-  return getUserIdBySessionToken(token);
-}
+  const body = await req.json().catch(() => null);
+  const action = String(body?.action ?? '');
 
-export async function GET(request: NextRequest) {
-  const userId = requireUserId(request);
-  if (!userId) return json({ error: "unauthorized" }, { status: 401 });
+  // создать задачу
+  if (action === 'create') {
+    const title = String(body?.title ?? '').trim();
+    if (!title) return NextResponse.json({ error: 'title_required' }, { status: 400 });
 
-  const tasks = getAllByUser(userId);
-  return json({ tasks }, { status: 200 });
-}
+    const created = await pool.query(
+      `INSERT INTO tasks (user_id, title)
+       VALUES ($1, $2)
+       RETURNING id, title, completed, created_at`,
+      [userId, title]
+    );
 
-export async function POST(request: NextRequest) {
-  const userId = requireUserId(request);
-  if (!userId) return json({ error: "unauthorized" }, { status: 401 });
+    return NextResponse.json({ task: created.rows[0] }, { status: 201 });
+  }
 
-  const body = await readBody(request);
-  const title = extractTitle(body);
-  if (!title) return json({ error: "title is required" }, { status: 400 });
+  // переключить completed
+  if (action === 'toggle') {
+    const id = Number(body?.id);
+    if (!Number.isFinite(id)) return NextResponse.json({ error: 'id_required' }, { status: 400 });
 
-  const task = createForUser(userId, title);
-  return json({ task }, { status: 201 });
-}
+    const updated = await pool.query(
+      `UPDATE tasks
+       SET completed = NOT completed
+       WHERE id = $1 AND user_id = $2
+       RETURNING id, title, completed, created_at`,
+      [id, userId]
+    );
 
-export async function DELETE(request: NextRequest) {
-  const userId = requireUserId(request);
-  if (!userId) return json({ error: "unauthorized" }, { status: 401 });
+    if (updated.rowCount === 0) {
+      return NextResponse.json({ error: 'not_found' }, { status: 404 });
+    }
 
-  const id = extractIdFromUrl(request);
-  if (id === null) return json({ error: "id query param is required" }, { status: 400 });
+    return NextResponse.json({ task: updated.rows[0] }, { status: 200 });
+  }
 
-  const removed = removeByIdForUser(userId, id);
-  if (!removed) return json({ error: "task not found" }, { status: 404 });
+  // удалить задачу
+  if (action === 'remove') {
+    const id = Number(body?.id);
+    if (!Number.isFinite(id)) return NextResponse.json({ error: 'id_required' }, { status: 400 });
 
-  return json({ ok: true }, { status: 200 });
-}
+    const del = await pool.query(
+      `DELETE FROM tasks WHERE id = $1 AND user_id = $2`,
+      [id, userId]
+    );
 
-export async function PATCH(request: NextRequest) {
-  const userId = requireUserId(request);
-  if (!userId) return json({ error: "unauthorized" }, { status: 401 });
+    if (del.rowCount === 0) {
+      return NextResponse.json({ error: 'not_found' }, { status: 404 });
+    }
 
-  const id = extractIdFromUrl(request);
-  if (id === null) return json({ error: "id query param is required" }, { status: 400 });
+    return NextResponse.json({ ok: true }, { status: 200 });
+  }
 
-  const body = await readBody(request);
-  const title = extractTitle(body);
-  if (!title) return json({ error: "title is required" }, { status: 400 });
+  // отметить все выполненными
+  if (action === 'completeAll') {
+    const upd = await pool.query(
+      `UPDATE tasks SET completed = TRUE
+       WHERE user_id = $1 AND completed = FALSE`,
+      [userId]
+    );
+    return NextResponse.json({ ok: true, changed: upd.rowCount }, { status: 200 });
+  }
 
-  const updated = updateByIdForUser(userId, id, title);
-  if (!updated) return json({ error: "task not found" }, { status: 404 });
+  // очистить выполненные
+  if (action === 'clearCompleted') {
+    const del = await pool.query(
+      `DELETE FROM tasks WHERE user_id = $1 AND completed = TRUE`,
+      [userId]
+    );
+    return NextResponse.json({ ok: true, changed: del.rowCount }, { status: 200 });
+  }
 
-  return json({ task: updated }, { status: 200 });
-}
-
-export async function PUT(request: NextRequest) {
-  const userId = requireUserId(request);
-  if (!userId) return json({ error: "unauthorized" }, { status: 401 });
-
-  const id = extractIdFromUrl(request);
-  if (id === null) return json({ error: "id query param is required" }, { status: 400 });
-
-  const updated = toggleCompletedForUser(userId, id);
-  if (!updated) return json({ error: "task not found" }, { status: 404 });
-
-  return json({ task: updated }, { status: 200 });
+  return NextResponse.json({ error: 'unknown_action' }, { status: 400 });
 }

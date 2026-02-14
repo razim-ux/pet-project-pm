@@ -71,6 +71,10 @@ export default function RegisterPage() {
         </button>
 
         {msg && <div>{msg}</div>}
+        <p style={{ marginTop: 20 }}>
+  Уже есть аккаунт? <a href="/login">Войти</a>
+</p>
+
       </form>
     </div>
   );

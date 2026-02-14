@@ -71,6 +71,9 @@ export default function LoginPage() {
         </button>
 
         {msg && <div>{msg}</div>}
+        <p style={{ marginTop: 20 }}>
+  Нет аккаунта? <a href="/register">Зарегистрироваться</a>
+</p>
       </form>
     </div>
   );
