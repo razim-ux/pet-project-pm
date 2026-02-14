@@ -1,27 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getUserIdBySessionToken, getUserById } from "../../tasks/storage";
+import { getUserById, getUserIdBySessionToken } from "../../tasks/storage";
 
 export const runtime = "nodejs";
 
-export async function GET(request: NextRequest) {
-  const token = request.cookies.get("session")?.value ?? null;
+export async function GET(req: NextRequest) {
+  const token = req.cookies.get("session")?.value ?? null;
 
-  const allCookies = request.cookies.getAll().map((c) => c.name);
+  const userId = token ? await getUserIdBySessionToken(token) : null;
+  const user = userId ? await getUserById(userId) : null;
 
-  const hasCookie = Boolean(token);
-  const cookieLen = token ? token.length : 0;
-
-  const userId = token ? getUserIdBySessionToken(token) : null;
-  const user = userId ? getUserById(userId) : null;
-
-  return NextResponse.json(
-    {
-      allCookies,
-      hasCookie,
-      cookieLen,
-      userId,
-      user,
-    },
-    { status: 200 }
-  );
+  return NextResponse.json({ token: token ? "present" : null, userId, user }, { status: 200 });
 }
