@@ -9,7 +9,7 @@ const pool = new Pool({
   ssl: { rejectUnauthorized: false },
 });
 
-function getUserIdFromSession(req: NextRequest): number | null {
+function getUserId(req: NextRequest): number | null {
   const token = req.cookies.get('session')?.value;
   if (!token) return null;
 
@@ -26,11 +26,11 @@ function getUserIdFromSession(req: NextRequest): number | null {
 }
 
 export async function GET(req: NextRequest) {
-  const userId = getUserIdFromSession(req);
+  const userId = getUserId(req);
   if (!userId) return NextResponse.json({ error: 'unauthorized' }, { status: 401 });
 
   const result = await pool.query(
-    `SELECT id, title, completed, created_at
+    `SELECT id, title, completed, assignee, start_date, end_date, created_at
      FROM tasks
      WHERE user_id = $1
      ORDER BY id DESC
@@ -42,28 +42,30 @@ export async function GET(req: NextRequest) {
 }
 
 export async function POST(req: NextRequest) {
-  const userId = getUserIdFromSession(req);
+  const userId = getUserId(req);
   if (!userId) return NextResponse.json({ error: 'unauthorized' }, { status: 401 });
 
   const body = await req.json().catch(() => null);
   const action = String(body?.action ?? '');
 
-  // создать задачу
   if (action === 'create') {
     const title = String(body?.title ?? '').trim();
+    const assignee = String(body?.assignee ?? '').trim() || null;
+    const startDate = body?.start_date ? new Date(body.start_date) : null;
+    const endDate = body?.end_date ? new Date(body.end_date) : null;
+
     if (!title) return NextResponse.json({ error: 'title_required' }, { status: 400 });
 
     const created = await pool.query(
-      `INSERT INTO tasks (user_id, title)
-       VALUES ($1, $2)
-       RETURNING id, title, completed, created_at`,
-      [userId, title]
+      `INSERT INTO tasks (user_id, title, assignee, start_date, end_date)
+       VALUES ($1, $2, $3, $4, $5)
+       RETURNING id, title, completed, assignee, start_date, end_date, created_at`,
+      [userId, title, assignee, startDate, endDate]
     );
 
     return NextResponse.json({ task: created.rows[0] }, { status: 201 });
   }
 
-  // переключить completed
   if (action === 'toggle') {
     const id = Number(body?.id);
     if (!Number.isFinite(id)) return NextResponse.json({ error: 'id_required' }, { status: 400 });
@@ -72,7 +74,7 @@ export async function POST(req: NextRequest) {
       `UPDATE tasks
        SET completed = NOT completed
        WHERE id = $1 AND user_id = $2
-       RETURNING id, title, completed, created_at`,
+       RETURNING id, title, completed, assignee, start_date, end_date, created_at`,
       [id, userId]
     );
 
@@ -83,7 +85,6 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ task: updated.rows[0] }, { status: 200 });
   }
 
-  // удалить задачу
   if (action === 'remove') {
     const id = Number(body?.id);
     if (!Number.isFinite(id)) return NextResponse.json({ error: 'id_required' }, { status: 400 });
@@ -98,25 +99,6 @@ export async function POST(req: NextRequest) {
     }
 
     return NextResponse.json({ ok: true }, { status: 200 });
-  }
-
-  // отметить все выполненными
-  if (action === 'completeAll') {
-    const upd = await pool.query(
-      `UPDATE tasks SET completed = TRUE
-       WHERE user_id = $1 AND completed = FALSE`,
-      [userId]
-    );
-    return NextResponse.json({ ok: true, changed: upd.rowCount }, { status: 200 });
-  }
-
-  // очистить выполненные
-  if (action === 'clearCompleted') {
-    const del = await pool.query(
-      `DELETE FROM tasks WHERE user_id = $1 AND completed = TRUE`,
-      [userId]
-    );
-    return NextResponse.json({ ok: true, changed: del.rowCount }, { status: 200 });
   }
 
   return NextResponse.json({ error: 'unknown_action' }, { status: 400 });

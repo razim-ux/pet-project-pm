@@ -40,11 +40,12 @@ export default function LoginPage() {
   }
 
   return (
-    <div style={{ maxWidth: 420, margin: '40px auto', padding: 16 }}>
-      <h1 style={{ fontSize: 24, marginBottom: 16 }}>Вход</h1>
+    <div className="container">
+  
+  <h1>Вход</h1>
 
-      <form onSubmit={onSubmit} style={{ display: 'grid', gap: 12 }}>
-        <label style={{ display: 'grid', gap: 6 }}>
+  <form onSubmit={onSubmit}>
+  <label>
           Email
           <input
             type="email"
@@ -55,7 +56,7 @@ export default function LoginPage() {
           />
         </label>
 
-        <label style={{ display: 'grid', gap: 6 }}>
+        <label>
           Password
           <input
             type="password"
