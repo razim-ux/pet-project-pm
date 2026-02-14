@@ -1,4 +1,4 @@
-// app/api/register/route.ts
+// app/api/login/route.ts
 export const runtime = 'nodejs';
 
 import { NextResponse } from 'next/server';
@@ -24,26 +24,31 @@ export async function POST(req: Request) {
       );
     }
 
-    const passwordHash = await bcrypt.hash(password, 10);
-
     const result = await pool.query(
-      `INSERT INTO users (email, password)
-       VALUES ($1, $2)
-       RETURNING id, email`,
-      [email, passwordHash]
+      `SELECT id, email, password
+       FROM users
+       WHERE email = $1
+       LIMIT 1`,
+      [email]
     );
 
-    return NextResponse.json(
-      { success: true, user: result.rows[0] },
-      { status: 201 }
-    );
-  } catch (error: any) {
-    if (error?.code === '23505') {
-      return NextResponse.json({ error: 'Такой email уже есть' }, { status: 409 });
+    const user = result.rows[0];
+    if (!user) {
+      return NextResponse.json({ error: 'Неверные данные' }, { status: 401 });
+    }
+
+    const ok = await bcrypt.compare(password, user.password);
+    if (!ok) {
+      return NextResponse.json({ error: 'Неверные данные' }, { status: 401 });
     }
 
     return NextResponse.json(
-      { error: error?.message || 'Ошибка регистрации' },
+      { success: true, user: { id: user.id, email: user.email } },
+      { status: 200 }
+    );
+  } catch (error: any) {
+    return NextResponse.json(
+      { error: error?.message || 'Ошибка логина' },
       { status: 500 }
     );
   }

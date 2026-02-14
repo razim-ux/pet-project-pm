@@ -4,7 +4,7 @@
 import { useState } from 'react';
 
 export default function RegisterPage() {
-  const [username, setUsername] = useState('');
+  const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [ok, setOk] = useState(false);
@@ -20,7 +20,7 @@ export default function RegisterPage() {
       const res = await fetch('/api/register', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username, password }),
+        body: JSON.stringify({ email, password }),
       });
 
       const data = await res.json().catch(() => ({}));
@@ -31,7 +31,7 @@ export default function RegisterPage() {
       }
 
       setOk(true);
-      setUsername('');
+      setEmail('');
       setPassword('');
     } catch (err: any) {
       setError(err?.message || 'Ошибка сети');
@@ -46,10 +46,10 @@ export default function RegisterPage() {
 
       <form onSubmit={onSubmit} style={{ display: 'grid', gap: 12 }}>
         <input
-          placeholder="Username"
-          value={username}
-          onChange={(e) => setUsername(e.target.value)}
-          autoComplete="username"
+          placeholder="Email"
+          value={email}
+          onChange={(e) => setEmail(e.target.value)}
+          autoComplete="email"
         />
         <input
           placeholder="Password"
