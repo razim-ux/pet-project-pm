@@ -1,9 +1,9 @@
-// app/api/login/route.ts
 export const runtime = 'nodejs';
 
 import { NextResponse } from 'next/server';
 import { Pool } from 'pg';
 import bcrypt from 'bcryptjs';
+import jwt from 'jsonwebtoken';
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
@@ -34,19 +34,53 @@ export async function POST(req: Request) {
     );
 
     const user = result.rows[0];
+
     if (!user) {
-      return NextResponse.json({ error: 'Неверные данные' }, { status: 401 });
+      return NextResponse.json(
+        { error: 'Неверные данные' },
+        { status: 401 }
+      );
     }
 
-    const ok = await bcrypt.compare(password, user.password_hash);
-    if (!ok) {
-      return NextResponse.json({ error: 'Неверные данные' }, { status: 401 });
+    const isValid = await bcrypt.compare(password, user.password_hash);
+
+    if (!isValid) {
+      return NextResponse.json(
+        { error: 'Неверные данные' },
+        { status: 401 }
+      );
     }
 
-    return NextResponse.json(
-      { success: true, user: { id: user.id, email: user.email } },
+    const JWT_SECRET = process.env.JWT_SECRET;
+
+    if (!JWT_SECRET) {
+      return NextResponse.json(
+        { error: 'JWT_SECRET is not set' },
+        { status: 500 }
+      );
+    }
+
+    const token = jwt.sign(
+      { id: user.id, email: user.email },
+      JWT_SECRET,
+      { expiresIn: '7d' }
+    );
+
+    const response = NextResponse.json(
+      { success: true },
       { status: 200 }
     );
+
+    response.cookies.set('session', token, {
+      httpOnly: true,
+      secure: true,
+      sameSite: 'lax',
+      path: '/',
+      maxAge: 60 * 60 * 24 * 7,
+    });
+
+    return response;
+
   } catch (error: any) {
     return NextResponse.json(
       { error: error?.message || 'Ошибка логина' },
