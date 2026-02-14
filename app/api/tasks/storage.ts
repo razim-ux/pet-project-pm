@@ -1,73 +1,29 @@
-import Database from "better-sqlite3";
-import path from "path";
 import crypto from "crypto";
 import * as bcrypt from "bcryptjs";
+import { Pool } from "pg";
 
 export type Task = { id: number; title: string; completed: boolean; userId: number };
 export type User = { id: number; username: string };
 
-const rootDir = process.cwd();
-const dbPath = path.join(rootDir, "tasks.db");
+const DATABASE_URL = process.env.DATABASE_URL;
 
-console.log("[storage] rootDir:", rootDir);
-console.log("[storage] dbPath:", dbPath);
-
-const db = new Database(dbPath);
-
-// --- базовые таблицы ---
-db.exec(`
-  CREATE TABLE IF NOT EXISTS tasks (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    title TEXT NOT NULL
-  );
-`);
-
-db.exec(`
-  CREATE TABLE IF NOT EXISTS users (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    username TEXT NOT NULL UNIQUE,
-    passwordHash TEXT NOT NULL,
-    createdAt INTEGER NOT NULL
-  );
-`);
-
-db.exec(`
-  CREATE TABLE IF NOT EXISTS sessions (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    userId INTEGER NOT NULL,
-    tokenHash TEXT NOT NULL UNIQUE,
-    createdAt INTEGER NOT NULL,
-    expiresAt INTEGER NOT NULL,
-    FOREIGN KEY (userId) REFERENCES users(id)
-  );
-`);
-
-// --- миграции ---
-function hasColumn(table: string, col: string) {
-  const columns = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
-  return columns.some((c) => c.name === col);
+if (!DATABASE_URL) {
+  throw new Error("DATABASE_URL is missing. Set it in Vercel Environment Variables (Production).");
 }
 
-if (!hasColumn("tasks", "completed")) {
-  db.exec(`ALTER TABLE tasks ADD COLUMN completed INTEGER NOT NULL DEFAULT 0`);
-  console.log("[storage] migrated: added tasks.completed");
+declare global {
+  // eslint-disable-next-line no-var
+  var __pgPool: Pool | undefined;
 }
 
-if (!hasColumn("tasks", "userId")) {
-  db.exec(`ALTER TABLE tasks ADD COLUMN userId INTEGER`);
-  console.log("[storage] migrated: added tasks.userId (nullable)");
-  // Старые задачи без userId станут "ничьи" и не будут видны после включения auth
-}
+const pool =
+  global.__pgPool ??
+  new Pool({
+    connectionString: DATABASE_URL,
+    ssl: process.env.NODE_ENV === "production" ? { rejectUnauthorized: false } : undefined,
+  });
 
-// --- helpers ---
-function rowToTask(r: any): Task {
-  return {
-    id: Number(r.id),
-    title: String(r.title),
-    completed: Boolean(r.completed),
-    userId: Number(r.userId),
-  };
-}
+if (!global.__pgPool) global.__pgPool = pool;
 
 function sha256(input: string) {
   return crypto.createHash("sha256").update(input).digest("hex");
@@ -77,8 +33,51 @@ function nowMs() {
   return Date.now();
 }
 
+// --- init/migrations (минимально) ---
+let initialized = false;
+
+async function init() {
+  if (initialized) return;
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS users (
+      id BIGSERIAL PRIMARY KEY,
+      username TEXT NOT NULL UNIQUE,
+      password_hash TEXT NOT NULL,
+      created_at BIGINT NOT NULL
+    );
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS sessions (
+      id BIGSERIAL PRIMARY KEY,
+      user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      token_hash TEXT NOT NULL UNIQUE,
+      created_at BIGINT NOT NULL,
+      expires_at BIGINT NOT NULL
+    );
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS tasks (
+      id BIGSERIAL PRIMARY KEY,
+      title TEXT NOT NULL,
+      completed BOOLEAN NOT NULL DEFAULT FALSE,
+      user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE
+    );
+  `);
+
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_tasks_user_id ON tasks(user_id);`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_tasks_user_completed ON tasks(user_id, completed);`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_sessions_token_hash ON sessions(token_hash);`);
+
+  initialized = true;
+}
+
 // --- AUTH: users ---
-export function createUser(username: string, password: string): User {
+export async function createUser(username: string, password: string): Promise<User> {
+  await init();
+
   const u = username.trim();
   if (!u) throw new Error("username_required");
   if (u.length < 3 || u.length > 32) throw new Error("username_length");
@@ -88,27 +87,56 @@ export function createUser(username: string, password: string): User {
   const createdAt = nowMs();
 
   try {
-    const info = db
-      .prepare("INSERT INTO users (username, passwordHash, createdAt) VALUES (?, ?, ?)")
-      .run(u, passwordHash, createdAt);
+    const res = await pool.query(
+      `INSERT INTO users (username, password_hash, created_at)
+       VALUES ($1, $2, $3)
+       RETURNING id, username`,
+      [u, passwordHash, createdAt]
+    );
 
-    return { id: Number(info.lastInsertRowid), username: u };
+    return { id: Number(res.rows[0].id), username: String(res.rows[0].username) };
   } catch (e: any) {
-    if (String(e?.message ?? "").includes("UNIQUE")) throw new Error("username_taken");
+    if (e?.code === "23505") throw new Error("username_taken");
     throw e;
   }
 }
 
-export function findUserByUsername(username: string): (User & { passwordHash: string }) | null {
+export async function findUserByUsername(
+  username: string
+): Promise<(User & { passwordHash: string }) | null> {
+  await init();
+
   const u = username.trim();
-  const row = db.prepare("SELECT id, username, passwordHash FROM users WHERE username = ?").get(u) as any;
-  if (!row) return null;
-  return { id: Number(row.id), username: String(row.username), passwordHash: String(row.passwordHash) };
+  const res = await pool.query(
+    `SELECT id, username, password_hash
+     FROM users
+     WHERE username = $1
+     LIMIT 1`,
+    [u]
+  );
+  if (res.rowCount === 0) return null;
+
+  const row = res.rows[0];
+  return {
+    id: Number(row.id),
+    username: String(row.username),
+    passwordHash: String(row.password_hash),
+  };
 }
 
-export function getUserById(id: number): User | null {
-  const row = db.prepare("SELECT id, username FROM users WHERE id = ?").get(id) as any;
-  if (!row) return null;
+export async function getUserById(id: number): Promise<User | null> {
+  await init();
+
+  const res = await pool.query(
+    `SELECT id, username
+     FROM users
+     WHERE id = $1
+     LIMIT 1`,
+    [id]
+  );
+  if (res.rowCount === 0) return null;
+
+  const row = res.rows[0];
   return { id: Number(row.id), username: String(row.username) };
 }
 
@@ -119,84 +147,154 @@ export function verifyPassword(password: string, passwordHash: string): boolean 
 // --- AUTH: sessions ---
 const SESSION_TTL_MS = 1000 * 60 * 60 * 24 * 30; // 30 дней
 
-export function createSession(userId: number): { token: string; expiresAt: number } {
+export async function createSession(userId: number): Promise<{ token: string; expiresAt: number }> {
+  await init();
+
   const token = crypto.randomBytes(32).toString("hex");
   const tokenHash = sha256(token);
   const createdAt = nowMs();
   const expiresAt = createdAt + SESSION_TTL_MS;
 
-  db.prepare("INSERT INTO sessions (userId, tokenHash, createdAt, expiresAt) VALUES (?, ?, ?, ?)")
-    .run(userId, tokenHash, createdAt, expiresAt);
+  await pool.query(
+    `INSERT INTO sessions (user_id, token_hash, created_at, expires_at)
+     VALUES ($1, $2, $3, $4)`,
+    [userId, tokenHash, createdAt, expiresAt]
+  );
 
   return { token, expiresAt };
 }
 
-export function getUserIdBySessionToken(token: string): number | null {
-  const tokenHash = sha256(token);
-  const row = db.prepare("SELECT userId, expiresAt FROM sessions WHERE tokenHash = ?").get(tokenHash) as any;
+export async function getUserIdBySessionToken(token: string): Promise<number | null> {
+  await init();
 
-  if (!row) return null;
-  if (Number(row.expiresAt) < nowMs()) {
-    db.prepare("DELETE FROM sessions WHERE tokenHash = ?").run(tokenHash);
+  const tokenHash = sha256(token);
+
+  const res = await pool.query(
+    `SELECT user_id, expires_at
+     FROM sessions
+     WHERE token_hash = $1
+     LIMIT 1`,
+    [tokenHash]
+  );
+
+  if (res.rowCount === 0) return null;
+
+  const row = res.rows[0];
+  const expiresAt = Number(row.expires_at);
+
+  if (expiresAt < nowMs()) {
+    await pool.query(`DELETE FROM sessions WHERE token_hash = $1`, [tokenHash]);
     return null;
   }
-  return Number(row.userId);
+
+  return Number(row.user_id);
 }
 
-export function deleteSession(token: string): void {
+export async function deleteSession(token: string): Promise<void> {
+  await init();
+
   const tokenHash = sha256(token);
-  db.prepare("DELETE FROM sessions WHERE tokenHash = ?").run(tokenHash);
+  await pool.query(`DELETE FROM sessions WHERE token_hash = $1`, [tokenHash]);
 }
 
-// --- TASKS (только для userId) ---
-export function getAllByUser(userId: number): Task[] {
-  const rows = db
-    .prepare("SELECT id, title, completed, userId FROM tasks WHERE userId = ? ORDER BY id DESC")
-    .all(userId) as any[];
-  return rows.map(rowToTask);
+// --- TASKS ---
+export async function getAllByUser(userId: number): Promise<Task[]> {
+  await init();
+
+  const res = await pool.query(
+    `SELECT id, title, completed, user_id
+     FROM tasks
+     WHERE user_id = $1
+     ORDER BY id DESC`,
+    [userId]
+  );
+
+  return res.rows.map((r) => ({
+    id: Number(r.id),
+    title: String(r.title),
+    completed: Boolean(r.completed),
+    userId: Number(r.user_id),
+  }));
 }
 
-export function createForUser(userId: number, title: string): Task {
-  const info = db.prepare("INSERT INTO tasks (title, completed, userId) VALUES (?, 0, ?)").run(title, userId);
-  return { id: Number(info.lastInsertRowid), title, completed: false, userId };
+export async function createForUser(userId: number, title: string): Promise<Task> {
+  await init();
+
+  const res = await pool.query(
+    `INSERT INTO tasks (title, completed, user_id)
+     VALUES ($1, FALSE, $2)
+     RETURNING id, title, completed, user_id`,
+    [title, userId]
+  );
+
+  const r = res.rows[0];
+  return { id: Number(r.id), title: String(r.title), completed: Boolean(r.completed), userId: Number(r.user_id) };
 }
 
-export function removeByIdForUser(userId: number, id: number): boolean {
-  const info = db.prepare("DELETE FROM tasks WHERE id = ? AND userId = ?").run(id, userId);
-  return info.changes > 0;
+export async function removeByIdForUser(userId: number, id: number): Promise<boolean> {
+  await init();
+
+  const res = await pool.query(
+    `DELETE FROM tasks
+     WHERE id = $1 AND user_id = $2`,
+    [id, userId]
+  );
+  return (res.rowCount ?? 0) > 0;
 }
 
-export function updateByIdForUser(userId: number, id: number, title: string): Task | null {
-  const info = db.prepare("UPDATE tasks SET title = ? WHERE id = ? AND userId = ?").run(title, id, userId);
-  if (info.changes === 0) return null;
+export async function updateByIdForUser(userId: number, id: number, title: string): Promise<Task | null> {
+  await init();
 
-  const row = db
-    .prepare("SELECT id, title, completed, userId FROM tasks WHERE id = ? AND userId = ?")
-    .get(id, userId) as any;
+  const res = await pool.query(
+    `UPDATE tasks
+     SET title = $1
+     WHERE id = $2 AND user_id = $3
+     RETURNING id, title, completed, user_id`,
+    [title, id, userId]
+  );
 
-  return row ? rowToTask(row) : null;
+  if ((res.rowCount ?? 0) === 0) return null;
+
+  const r = res.rows[0];
+  return { id: Number(r.id), title: String(r.title), completed: Boolean(r.completed), userId: Number(r.user_id) };
 }
 
-export function toggleCompletedForUser(userId: number, id: number): Task | null {
-  const info = db
-    .prepare("UPDATE tasks SET completed = CASE completed WHEN 0 THEN 1 ELSE 0 END WHERE id = ? AND userId = ?")
-    .run(id, userId);
+export async function toggleCompletedForUser(userId: number, id: number): Promise<Task | null> {
+  await init();
 
-  if (info.changes === 0) return null;
+  const res = await pool.query(
+    `UPDATE tasks
+     SET completed = NOT completed
+     WHERE id = $1 AND user_id = $2
+     RETURNING id, title, completed, user_id`,
+    [id, userId]
+  );
 
-  const row = db
-    .prepare("SELECT id, title, completed, userId FROM tasks WHERE id = ? AND userId = ?")
-    .get(id, userId) as any;
+  if ((res.rowCount ?? 0) === 0) return null;
 
-  return row ? rowToTask(row) : null;
+  const r = res.rows[0];
+  return { id: Number(r.id), title: String(r.title), completed: Boolean(r.completed), userId: Number(r.user_id) };
 }
 
-export function completeAllForUser(userId: number): number {
-  const info = db.prepare("UPDATE tasks SET completed = 1 WHERE userId = ? AND completed = 0").run(userId);
-  return info.changes;
+export async function completeAllForUser(userId: number): Promise<number> {
+  await init();
+
+  const res = await pool.query(
+    `UPDATE tasks
+     SET completed = TRUE
+     WHERE user_id = $1 AND completed = FALSE`,
+    [userId]
+  );
+  return res.rowCount ?? 0;
 }
 
-export function clearCompletedForUser(userId: number): number {
-  const info = db.prepare("DELETE FROM tasks WHERE userId = ? AND completed = 1").run(userId);
-  return info.changes;
+export async function clearCompletedForUser(userId: number): Promise<number> {
+  await init();
+
+  const res = await pool.query(
+    `DELETE FROM tasks
+     WHERE user_id = $1 AND completed = TRUE`,
+    [userId]
+  );
+  return res.rowCount ?? 0;
 }
